@@ -136,7 +136,36 @@ interface Queue<A> : Enqueue<A>, Dequeue1<A>, Dequeue<A> {
     fun <A> unsafeFairUnbounded(fairSize: Int): Queue<A> =
       fromStrategy(Strategy.fifo<A>().transformSelector { size, _ -> min(size, fairSize) })
 
-    /** Creates a FIFO queue with the specified size bound. */
+    /**
+     * Creates a FIFO queue with the specified size bound.
+     *
+     * ```kotlin:ank:playground
+     * import arrow.fx.coroutines.*
+     * import arrow.fx.coroutines.stream.*
+     * import arrow.fx.coroutines.stream.concurrent.*
+     *
+     * suspend fun main(): Unit {
+     *   val q = Queue.bounded<Int>(10)
+     *   Stream(
+     *     Stream.range(0..100)
+     *       .through(q.enqueue())
+     *       .void(),
+     *     q.dequeue()
+     *   ).parJoinUnbounded()
+     *     .take(100)
+     *     .toList().let(::println) // [0, 1, 2, .., 99]
+     *
+     *   val alwaysEmpty = Queue.bounded<Int>(0)
+     *   ForkConnected { alwaysEmpty.dequeue1() }
+     *   alwaysEmpty.tryOffer1(1).let(::println) // false
+     * }
+     * ```
+     *
+     * A size <= 0, will not allow any elements to pass through the [Queue],
+     * in that case it will always return `false` for `tryOffer1`.
+     *
+     * @see Queue.synchronous If you need a [Queue] that suspends until both a [dequeue] & [enqueue] happen, or handshake.
+     */
     suspend fun <A> bounded(maxSize: Int): Queue<A> =
       fromStrategy(Strategy.boundedFifo(maxSize))
 
@@ -144,11 +173,18 @@ interface Queue<A> : Enqueue<A>, Dequeue1<A>, Dequeue<A> {
       fromStrategy(Strategy.boundedFifo(maxSize))
 
     /** Creates a queue which stores the last `maxSize` enqueued elements and which never blocks on enqueue. */
-    suspend fun <A> circularBuffer(maxSize: Int): Queue<A> =
-      fromStrategy(Strategy.circularBuffer(maxSize))
+    suspend fun <A> sliding(maxSize: Int): Queue<A> =
+      fromStrategy(Strategy.sliding(maxSize))
 
-    fun <A> unsafeCircularBuffer(maxSize: Int): Queue<A> =
-      fromStrategy(Strategy.circularBuffer(maxSize))
+    fun <A> unsafeSliding(maxSize: Int): Queue<A> =
+      fromStrategy(Strategy.sliding(maxSize))
+
+    /** Creates a queue which stores the first `maxSize` enqueued elements and which never blocks on enqueue. */
+    suspend fun <A> dropping(maxSize: Int): Queue<A> =
+      fromStrategy(Strategy.dropping(maxSize))
+
+    fun <A> unsafeDropping(maxSize: Int): Queue<A> =
+      fromStrategy(Strategy.dropping(maxSize))
 
     /** Created a bounded queue that distributed always at max `fairSize` elements to any subscriber. */
     suspend fun <A> fairBounded(maxSize: Int, fairSize: Int): Queue<A> =
@@ -157,7 +193,11 @@ interface Queue<A> : Enqueue<A>, Dequeue1<A>, Dequeue<A> {
     fun <A> unsafeFairBounded(maxSize: Int, fairSize: Int): Queue<A> =
       fromStrategy(Strategy.boundedFifo<A>(maxSize).transformSelector { size, _ -> min(size, fairSize) })
 
-    /** Creates a queue which allows at most a single element to be enqueued at any time. */
+    /**
+     * Creates a [Queue] in which each [enqueue] operation must wait for a corresponding [dequeue] operation, and vice versa.
+     * In other words, [dequeue] and [enqueue] need to shake hands, or meet, before the value is successfully passed along.
+     * Works like functional suspending version [java.util.concurrent.SynchronousQueue].
+     */
     suspend fun <A> synchronous(): Queue<A> =
       fromStrategy(Strategy.synchronous())
 
@@ -205,11 +245,17 @@ internal object Strategy {
   fun <A> boundedLifo(maxSize: Int): PubSub.Strategy<A, Chunk<A>, IQueue<A>, Int> =
     PubSub.Strategy.bounded(maxSize, lifo()) { it.size }
 
-  /** Strategy for circular buffer, which stores the last `maxSize` enqueued elements and never blocks on enqueue. */
-  fun <A> circularBuffer(maxSize: Int): PubSub.Strategy<A, Chunk<A>, IQueue<A>, Int> =
+  /** Strategy for sliding, which stores the last `maxSize` enqueued elements and never blocks on enqueue. */
+  fun <A> sliding(maxSize: Int): PubSub.Strategy<A, Chunk<A>, IQueue<A>, Int> =
     unbounded { q: IQueue<A>, a ->
-      if (q.size < maxSize) q.enqueue(a)
-      else q.tail().enqueue(a)
+      if (q.size <= maxSize) q.enqueue(a)
+      else q.drop(1).enqueue(a)
+    }
+
+  /** Strategy for dropping, which stores the first `maxSize` enqueued elements and never blocks on enqueue. */
+  fun <A> dropping(maxSize: Int): PubSub.Strategy<A, Chunk<A>, IQueue<A>, Int> =
+    unbounded { q: IQueue<A>, a ->
+      if (q.size <= maxSize) q.enqueue(a) else q
     }
 
   /** Unbounded lifo strategy. */
